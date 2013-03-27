@@ -16,6 +16,104 @@ function areyousure {
     [ "$bool" != "y" ] && echo "Ok, aborting..." && exit 0
 }
 
+function backup {
+  [ -f "${backup_file}" ] && [ -z ${force} ] && areyousure "${backup_file} already exists. Overwrite? (y/N) " 
+  
+  [ -d ${BACKUPDIR} ] && echo "Directory ${BACKUPDIR} already exists. Aborting" && exit 1
+  mkdir -p ${BACKUPDIR}
+  [ ! -d ${BACKUPDIR} ] && echo "Couldn't create ${BACKUPDIR}. Aborting" && exit 1
+
+  # Rundeck config
+  [ -z "$exclude_config" ] && cp -a ${RUNDECK_CONFIG_DIR} ${BACKUPDIR}
+  [ $? -ne 0 ] && errors_config=1   
+
+  # Project definitions
+  PROJECTS_VALUE=`grep ^project.dir ${RUNDECK_CONFIG_DIR}/project.properties|cut -d "=" -f 2`
+  PROJECTS_DIR=`dirname ${PROJECTS_VALUE}`
+  [ -z "${exclude_projects}" ] && cp -a ${PROJECTS_DIR} ${BACKUPDIR}
+  [ $? -ne 0 ] && errors_projects=1
+
+  # Project keys
+  
+  [ -z "${exclude_keys}" ] && for project in ${PROJECTS_DIR}/*;do key=`grep project.ssh-keypath ${project}/etc/project.properties|cut -d"=" -f 2`;cp ${key} ${key}.pub ${project};[ $? -ne 0 ] && errors_keys=1 ;done
+
+  # Job definitions
+  if [ -z "${exclude_jobs}" ];then
+    service ${RUNDECK_SERVICE} status > /dev/null  
+    [ $? -ne 0 ] && [ -z ${force} ] && areyousure "Rundeck service is not running, so jobs can't be restored. Do you want to start rundeck? (y/N) "
+    service ${RUNDECK_SERVICE} start
+    sleep 60
+    service ${RUNDECK_SERVICE} status > /dev/null  
+    [ $? -ne 0 ] && echo  "Rundeck could not start. Aborting..."
+    for project in ${PROJECTS_DIR}/*;do rd-jobs list -f ${BACKUPDIR}/`basename ${project}.xml` -p `basename ${project}` > /dev/null;[ $? -ne 0 ] && errors_jobs=1;done
+  fi
+
+  # known_hosts
+  [ -z "${exclude_hosts}" ] && cp `getent passwd ${RUNDECK_USER}|cut -d":" -f6`/.ssh/known_hosts ${BACKUPDIR}
+  [ $? -ne 0 ] && errors_hosts=1
+  
+  # execution logs
+  [ -n "${include_logs}" ] && cp -a `grep ^framework.logs.dir ${RUNDECK_CONFIG_DIR}/framework.properties |cut -d"=" -f 2` ${BACKUPDIR}
+  [ $? -ne 0 ] && [ -n "${include_logs}" ] && errors_logs=1
+
+  cd ${BACKUPDIR}
+  tar zcf "${backup_file}" *
+  [ $? -ne 0 ] && echo "Error creating tar file. Is there free space? Do you have permissions over this file?" && exit 1
+  rm -rf ${BACKUPDIR}
+}
+
+
+function restore {
+  
+  service ${RUNDECK_SERVICE} status > /dev/null  
+  [ $? -eq 0 ] && [ -z ${force} ] && areyousure "Rundeck service is running. It's recommended to stop it before restoring a backup. Do you want to continue? (y/N) "
+  
+  [ ! -f "${backup_file}" ] && echo "Error: file ${backup_file} not found" && usage && exit 1  
+  [ -d ${BACKUPDIR} ] && echo "Directory ${BACKUPDIR} already exists. Aborting" && exit 1
+  mkdir -p ${BACKUPDIR}
+  [ ! -d ${BACKUPDIR} ] && echo "Unknown error. Couldn't create ${BACKUPDIR}. Aborting" && exit 1
+  
+  cd ${BACKUPDIR}
+  tar zxf "${backup_file}"      
+  [ $? -ne 0 ] && echo "ERROR - Could not unpack backup file. Maybe it's not a .tar.gz file, maybe there isn't enough free space, maybe you don't have permissions to write in ${BACKUPDIR}. Aborting ..." && exit 1
+
+  # Rundeck config
+  [ -z "$exclude_config" ] && cp -a `basename ${RUNDECK_CONFIG_DIR}` `dirname ${RUNDECK_CONFIG_DIR}`
+  [ $? -ne 0 ] && errors_config=1   
+
+  # Project definitions
+  configdir=`basename ${RUNDECK_CONFIG_DIR}`
+  PROJECTS_VALUE=`grep ^project.dir $configdir/project.properties|cut -d "=" -f 2`
+  PROJECTS_DIR=`dirname ${PROJECTS_VALUE}`
+  [ -z "${exclude_projects}" ] && cp -a projects/* ${PROJECTS_DIR}
+  [ $? -ne 0 ] && errors_projects=1
+
+  # Project keys
+  [ -z "${exclude_keys}" ] && for project in projects/*;do key=`grep project.ssh-keypath ${project}/etc/project.properties|cut -d"=" -f 2`;cp $project/`basename ${key}` $project/`basename ${key}`.pub `dirname ${key}`;[ $? -ne 0 ] && errors_keys=1 ;done
+
+  # Job definitions
+  if [ -z "${exclude_jobs}" ];then
+    service ${RUNDECK_SERVICE} status > /dev/null  
+    [ $? -ne 0 ] && [ -z ${force} ] && areyousure "Rundeck service is not running, so jobs can't be restored. Do you want to start rundeck? (y/N) "
+    service ${RUNDECK_SERVICE} start
+    sleep 60
+    service ${RUNDECK_SERVICE} status > /dev/null  
+    [ $? -ne 0 ] && echo  "Rundeck could not start. Aborting..."
+    for project in projects/*;do rd-jobs load -f `basename ${project}`.xml > /dev/null;[ $? -ne 0 ] && errors_jobs=1;done
+  fi
+  
+  # known_hosts
+  [ -z "${exclude_hosts}" ] && cp known_hosts `getent passwd ${RUNDECK_USER}|cut -d":" -f6`/.ssh/known_hosts
+  [ $? -ne 0 ] && errors_hosts=1
+  
+  # execution logs
+  [ -n "${include_logs}" ] && cp -a logs/* `grep ^framework.logs.dir ${RUNDECK_CONFIG_DIR}/framework.properties |cut -d"=" -f 2`
+  [ $? -ne 0 ] && [ -n "${include_logs}" ] && errors_logs=1
+
+  rm -rf ${BACKUPDIR}  
+}
+
+
 args=`getopt -o hlc:fu:s: --long help,exclude-config,exclude-projects,exclude-keys,exclude-jobs,exclude-hosts,include-logs,configdir:,force,user:,service: -n $0 -- "$@"`
 [ $? != 0 ] && echo "$0: Could not parse arguments" && usage && exit 1
 eval set -- "$args"
@@ -83,100 +181,6 @@ backup_file=`readlink -m "$backup_file"`
 ID=${RANDOM}
 BACKUPDIR=/${TMPDIR}/rundeck-backup-$ID
 
-function backup {
-  [ -f "${backup_file}" ] && [ -z ${force} ] && areyousure "${backup_file} already exists. Overwrite? (y/N) " 
-  
-  [ -d ${BACKUPDIR} ] && echo "Directory ${BACKUPDIR} already exists. Aborting" && exit 1
-  mkdir -p ${BACKUPDIR}
-  [ ! -d ${BACKUPDIR} ] && echo "Couldn't create ${BACKUPDIR}. Aborting" && exit 1
-
-  # Rundeck config
-  [ -z "$exclude_config" ] && cp -a ${RUNDECK_CONFIG_DIR} ${BACKUPDIR}
-  [ $? -ne 0 ] && errors_config=1   
-
-  # Project definitions
-  PROJECTS_VALUE=`grep ^project.dir ${RUNDECK_CONFIG_DIR}/project.properties|cut -d "=" -f 2`
-  PROJECTS_DIR=`dirname ${PROJECTS_VALUE}`
-  [ -z "${exclude_projects}" ] && cp -a ${PROJECTS_DIR} ${BACKUPDIR}
-  [ $? -ne 0 ] && errors_projects=1
-
-  # Project keys
-  
-  [ -z "${exclude_keys}" ] && for project in ${PROJECTS_DIR}/*;do key=`grep project.ssh-keypath ${project}/etc/project.properties|cut -d"=" -f 2`;cp ${key} ${key}.pub ${project};[ $? -ne 0 ] && errors_keys=1 ;done
-
-  # Job definitions
-  if [ -z "${exclude_jobs}" ];then
-    service ${RUNDECK_SERVICE} status > /dev/null  
-    [ $? -ne 0 ] && [ -z ${force} ] && areyousure "Rundeck service is not running, so jobs can't be restored. Do you want to start rundeck? (y/N) "
-    service ${RUNDECK_SERVICE} start
-    sleep 60
-    service ${RUNDECK_SERVICE} status > /dev/null  
-    [ $? -ne 0 ] && echo  "Rundeck could not start. Aborting..."
-    for project in ${PROJECTS_DIR}/*;do rd-jobs list -f ${BACKUPDIR}/`basename ${project}.xml` -p `basename ${project}` > /dev/null;[ $? -ne 0 ] && errors_jobs=1;done
-  fi
-
-  # known_hosts
-  [ -z "${exclude_hosts}" ] && cp `getent passwd ${RUNDECK_USER}|cut -d":" -f6`/.ssh/known_hosts ${BACKUPDIR}
-  [ $? -ne 0 ] && errors_hosts=1
-  
-  # execution logs
-  [ -n "${include_logs}" ] && cp -a `grep ^framework.logs.dir ${RUNDECK_CONFIG_DIR}/framework.properties |cut -d"=" -f 2` ${BACKUPDIR}
-  [ $? -ne 0 ] && [ -n "${include_logs}" ] && errors_logs=1
-
-  cd ${BACKUPDIR}
-  tar zcf "${backup_file}" *
-  [ $? -ne 0 ] && echo "Error creating tar file. Is there free space? Do you have permissions over this file?" && exit 1
-  rm -rf ${BACKUPDIR}
-}
-
-function restore {
-  
-  service ${RUNDECK_SERVICE} status > /dev/null  
-  [ $? -eq 0 ] && [ -z ${force} ] && areyousure "Rundeck service is running. It's recommended to stop it before restoring a backup. Do you want to continue? (y/N) "
-  
-  [ ! -f "${backup_file}" ] && echo "Error: file ${backup_file} not found" && usage && exit 1  
-  [ -d ${BACKUPDIR} ] && echo "Directory ${BACKUPDIR} already exists. Aborting" && exit 1
-  mkdir -p ${BACKUPDIR}
-  [ ! -d ${BACKUPDIR} ] && echo "Unknown error. Couldn't create ${BACKUPDIR}. Aborting" && exit 1
-  
-  cd ${BACKUPDIR}
-  tar zxf "${backup_file}"      
-
-  # Rundeck config
-  [ -z "$exclude_config" ] && cp -a `basename ${RUNDECK_CONFIG_DIR}` `dirname ${RUNDECK_CONFIG_DIR}`
-  [ $? -ne 0 ] && errors_config=1   
-
-  # Project definitions
-  configdir=`basename ${RUNDECK_CONFIG_DIR}`
-  PROJECTS_VALUE=`grep ^project.dir $configdir/project.properties|cut -d "=" -f 2`
-  PROJECTS_DIR=`dirname ${PROJECTS_VALUE}`
-  [ -z "${exclude_projects}" ] && cp -a projects/* ${PROJECTS_DIR}
-  [ $? -ne 0 ] && errors_projects=1
-
-  # Project keys
-  [ -z "${exclude_keys}" ] && for project in projects/*;do key=`grep project.ssh-keypath ${project}/etc/project.properties|cut -d"=" -f 2`;cp $project/`basename ${key}` $project/`basename ${key}`.pub `dirname ${key}`;[ $? -ne 0 ] && errors_keys=1 ;done
-
-  # Job definitions
-  if [ -z "${exclude_jobs}" ];then
-    service ${RUNDECK_SERVICE} status > /dev/null  
-    [ $? -ne 0 ] && [ -z ${force} ] && areyousure "Rundeck service is not running, so jobs can't be restored. Do you want to start rundeck? (y/N) "
-    service ${RUNDECK_SERVICE} start
-    sleep 60
-    service ${RUNDECK_SERVICE} status > /dev/null  
-    [ $? -ne 0 ] && echo  "Rundeck could not start. Aborting..."
-    for project in projects/*;do rd-jobs load -f `basename ${project}`.xml > /dev/null;[ $? -ne 0 ] && errors_jobs=1;done
-  fi
-  
-  # known_hosts
-  [ -z "${exclude_hosts}" ] && cp known_hosts `getent passwd ${RUNDECK_USER}|cut -d":" -f6`/.ssh/known_hosts
-  [ $? -ne 0 ] && errors_hosts=1
-  
-  # execution logs
-  [ -n "${include_logs}" ] && cp -a logs/* `grep ^framework.logs.dir ${RUNDECK_CONFIG_DIR}/framework.properties |cut -d"=" -f 2`
-  [ $? -ne 0 ] && [ -n "${include_logs}" ] && errors_logs=1
-
-  rm -rf ${BACKUPDIR}  
-}
 
 if [ ${action} == "backup" ];then
   backup ${backup_file}
