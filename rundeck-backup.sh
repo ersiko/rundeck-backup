@@ -4,7 +4,7 @@ RUNDECK_USER=rundeck
 RUNDECK_CONFIG_DIR=/etc/rundeck
 RUNDECK_SERVICE=rundeckd
 TMPDIR=/tmp
-DEFAULT_BACKUP_FILE=`pwd`/rundeck-backup-`date +%Y%m%d`.tar.gz
+DEFAULT_BACKUP_FILE=rundeck-backup-`date +%Y%m%d`.tar.gz
 
 
 function usage {
@@ -17,6 +17,7 @@ function areyousure {
 }
 
 function backup {
+  [ -d "${backup_file}" ] && backup_file="${backup_file}/${DEFAULT_BACKUP_FILE}"
   [ -f "${backup_file}" ] && [ -z ${force} ] && areyousure "${backup_file} already exists. Overwrite? (y/N) " 
   
   [ -d ${BACKUPDIR} ] && echo "Directory ${BACKUPDIR} already exists. Aborting" && exit 1
