@@ -59,7 +59,7 @@ function backup {
       [ $? -ne 0 ] && echo  "Rundeck could not start. Aborting..."
     fi
     mkdir -p ${BACKUPDIR}/jobs
-    for project in ${PROJECTS_DIR}/*;do rd-jobs list -f ${BACKUPDIR}/jobs/`basename ${project}.xml` -p `basename ${project}` > /dev/null
+    for project in ${PROJECTS_DIR}/*;do rd jobs list -f ${BACKUPDIR}/jobs/`basename ${project}.xml` -p `basename ${project}` > /dev/null
     [ $? -ne 0 ] && errors_jobs=1;done
   fi
 
@@ -128,7 +128,7 @@ function restore {
     sleep 60
     service ${RUNDECK_SERVICE} status > /dev/null  
     [ $? -ne 0 ] && echo  "Rundeck could not start. Aborting..."
-    for project in projects/*;do rd-jobs load -f jobs/`basename ${project}`.xml > /dev/null
+    for project in projects/*;do rd jobs load -f jobs/`basename ${project}`.xml -p `basename ${project}`> /dev/null
     [ $? -ne 0 ] && errors_jobs=1;done
   fi
   
@@ -194,7 +194,7 @@ while true ; do
                                echo "-f | --force"
                                echo "     Assume 'yes' to all questions"
                                echo ""
-                               echo "This plugin will backup or restore a rundeck instance, copying files and exporting job definitions with rd-jobs tool. "
+                               echo "This plugin will backup or restore a rundeck instance, copying files and exporting job definitions with rd jobs tool. "
                                echo "Examples:"
                                echo "     $0 backup rundeck-201303.tar.gz"
                                echo "     $0 restore --exclude-jobs rundeck-201303.tar.gz"
